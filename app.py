@@ -9,6 +9,7 @@ from slack_sdk.web import WebClient
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 from ai import Ai
 import ai as aiutil
+from openai.types.chat.completion_create_params import Function
 
 dotenv.load_dotenv()
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
@@ -32,21 +33,47 @@ def message_hello(message: Dict, say: Say):
     messages, personality_emoji = chatbot.create_request_messages(replies.data["messages"])
     logger.info(f"AIに渡すメッセージを作成しました。(人格絵文字: {personality_emoji})")
     # AIに送信する。
-    res_text, _ = ai.chatgpt(messages)
+    res_text, _, image = ai.chatgpt(messages, chatbot.functions)
     logger.info(f"AIメッセージを取得しました。'{res_text}'")
-    # slackに投稿する。
-    say(res_text, icon_emoji=personality_emoji, thread_ts=thread_ts)
-    logger.info(f"応答が完了しました。")
-
+    if image:
+        # slackに画像を投稿する。
+        client.files_upload(
+            channels=channel_id,
+            thread_ts=thread_ts,
+            file=image,
+            filename="image.png",
+            filetype="png",
+            initial_comment=res_text,
+            icon_emoji=personality_emoji,
+        )
+        logger.info(f"画像を投稿しました。")
+    else:
+        # slackに投稿する。
+        say(res_text, icon_emoji=personality_emoji, thread_ts=thread_ts)
+        logger.info(f"応答が完了しました。")
 
 
 class Chatbot:
     def __init__(self, bot_id: str):
         self.bot_id = bot_id
+        self.functions = [
+            Function(
+                name="generate_image",
+                description="Generate an image from text prompt using DALL-E 3",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "prompt": {
+                            "type": "string",
+                            "description": "The prompt to generate the image from",
+                        },
+                    },
+                }
+            )
+        ]
         self.context_messages = ai.constuct_messages(self.create_context)
         self.personalities = [1, 2, 3, 4]
         self.personality_icons = [":rage:", ":fearful:", ":zany_face:", ":chatgpt:"]
-
 
     def create_context(self, s, u, a):
         return [
@@ -59,7 +86,8 @@ class Chatbot:
 人格1、2、3は、人格4の発言に対しても感情豊かに反応します。
 各人格は、それぞれ個性的な話し方をします。他の人格の話し方に影響を受けません。
 人格1はずっと乱暴なままで、丁寧語は絶対使いません。
-人格3はでたらめな人で絶対に真面目なことを言いません。"""),
+人格3はでたらめな人で絶対に真面目なことを言いません。
+なお、各人格は画像生成能力を持っています。画像生成のお願いには素直に応じますが、プロンプトは自分なりにアレンジして生成します。"""),
             u("はじめまして"),
             a("（私は人格1です）"),
             a("うるせえ。消えてなくなれ。話しかけてくるな！"),
@@ -69,14 +97,14 @@ class Chatbot:
             a("ハロー🤗こんにちは😁今日はいい天気だね😎でもね、すぐ雨が降るよ😢さっき火星人の天気予報がそう言っていたからね😜"),
         ]
 
-
     def create_request_messages(self, replies: list[dict]) -> Tuple[list[dict], str]:
         messages = []
         messages.extend(self.context_messages)
         for reply in replies:
             if reply.get("bot_id") == self.bot_id:
-                emoji = reply["icons"]["emoji"]
-                personality = self.personalities[self.personality_icons.index(emoji)] if emoji in self.personality_icons else 4
+                emoji = reply["icons"]["emoji"] if "icons" in reply else ":chatgpt:"
+                personality = self.personalities[
+                    self.personality_icons.index(emoji)] if emoji in self.personality_icons else 4
                 messages.append(aiutil.message_of_assistant(f"（私は人格{personality}です）"))
                 messages.append(aiutil.message_of_assistant(reply["text"]))
             else:
